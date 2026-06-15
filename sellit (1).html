@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SellIt — Buy & Sell Locally</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet"/>
+
+<!--
+  ════════════════════════════════════════════════════════
+  FIREBASE SETUP — do this once:
+  1. Go to https://console.firebase.google.com
+  2. Create a project → Add a Web App
+  3. Paste your config values below
+  4. In Firebase Console:
+     - Authentication → Sign-in method → Enable Google
+     - Firestore Database → Create database (start in test mode)
+  5. In Firebase Console → Authentication → Settings →
+     Authorized domains → add your GitHub Pages domain
+     e.g. shriranga04.github.io
+  ════════════════════════════════════════════════════════
+-->
+<script type="module">
+import { initializeApp }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+/* ── PASTE YOUR FIREBASE CONFIG HERE ── */
+const firebaseConfig = {
+  apiKey:            "REPLACE_YOUR_API_KEY",
+  authDomain:        "REPLACE_YOUR_AUTH_DOMAIN",
+  projectId:         "REPLACE_YOUR_PROJECT_ID",
+  storageBucket:     "REPLACE_YOUR_STORAGE_BUCKET",
+  messagingSenderId: "REPLACE_YOUR_MESSAGING_SENDER_ID",
+  appId:             "REPLACE_YOUR_APP_ID"
+};
+
+const app      = initializeApp(firebaseConfig);
+const auth     = getAuth(app);
+const db       = getFirestore(app);
+const provider = new GoogleAuthProvider();
+
+/* ── Watch login state ── */
+onAuthStateChanged(auth, async user => {
+  if (user) {
+    window._currentUser = user;
+    const snap = await getDoc(doc(db, "users", user.uid));
+    if (!snap.exists()) {
+      showModal('role-modal');
+    } else {
+      const d = snap.data();
+      window._userRole        = d.role;
+      window._sellerPaid      = d.sellerPaid || false;
+      window._sellerPaidUntil = d.sellerPaidUntil || null;
+      updateNavUser(user);
+      closeAllModals();
+    }
+  } else {
+    window._currentUser = null;
+    window._userRole    = null;
+    window._sellerPaid  = false;
+    updateNavUser(null);
+  }
+});
+
+/* ── Google Sign-In ── */
+window.googleSignIn = async function() {
+  try { await signInWithPopup(auth, provider); }
+  catch(e) { alert("Sign-in failed. Make sure your domain is added to Firebase Authorized Domains."); }
+};
+
+/* ── Sign Out ── */
+window.doSignOut = async function() {
+  await signOut(auth);
+  window._currentUser = null;
+  window._userRole    = null;
+  window._sellerPaid  = false;
+  updateNavUser(null);
+  showPage('home');
+};
+
+/* ── Save role after selection ── */
+window.saveRole = async function(role) {
+  const user = window._currentUser;
+  if (!user) return;
+  await setDoc(doc(db, "users", user.uid), {
+    name: user.displayName, email: user.email,
+    photo: user.photoURL, role,
+    sellerPaid: false, createdAt: serverTimestamp()
+  });
+  window._userRole   = role;
+  window._sellerPaid = false;
+  updateNavUser(user);
+  closeAllModals();
+  if (role === 'seller') showModal('seller-fee-modal');
+};
+
+/* ── Called after admin verifies GPay payment ── */
+window.markSellerPaid = async function() {
+  const user = window._currentUser;
+  if (!user) return;
+  const until = new Date();
+  until.setFullYear(until.getFullYear() + 1);
+  await setDoc(doc(db, "users", user.uid),
+    { sellerPaid: true, sellerPaidUntil: until.toISOString() },
+    { merge: true }
+  );
+  window._sellerPaid      = true;
+  window._sellerPaidUntil = until.toISOString();
+  updateNavUser(user);
+};
+
+/* ── Submit screenshot proof to Firestore ── */
+window.submitPaymentProof = async function() {
+  const user = window._currentUser;
+  if (!user) return;
+  const utrInput = document.getElementById('utr-input').value.trim();
+  if (!utrInput) { alert("Please enter your UTR / transaction ID."); return; }
+  await setDoc(doc(db, "payment_requests", user.uid), {
+    name:      user.displayName,
+    email:     user.email,
+    uid:       user.uid,
+    utr:       utrInput,
+    amount:    499,
+    status:    "pending",
+    createdAt: serverTimestamp()
+  });
+  closeAllModals();
+  showModal('payment-pending-modal');
+};
+</script>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --brand:#FF5C2B;--brand-dark:#CC4118;--brand-light:#FFF1EC;
+  --bg:#F6F5F2;--text:#1A1A1A;--muted:#6B6B6B;--border:#E2E0DC;
+  --green:#1A9E5F;--green-light:#E6F7EF;
+  --radius:12px;--shadow:0 2px 12px rgba(0,0,0,0.08);
+}
+body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+a{text-decoration:none;color:inherit}
+button{font-family:inherit;cursor:pointer;border:none;outline:none}
+
+/* NAV */
+nav{background:#fff;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
+.nav-inner{max-width:1200px;margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:16px;height:60px}
+.logo{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;color:var(--brand);letter-spacing:-0.5px;cursor:pointer}
+.logo span{color:var(--text)}
+.search-bar{flex:1;max-width:480px;display:flex;align-items:center;background:var(--bg);border:1.5px solid var(--border);border-radius:40px;padding:0 16px;gap:10px;height:40px}
+.search-bar input{border:none;background:transparent;font-size:14px;flex:1;color:var(--text)}
+.search-bar input:focus{outline:none}
+.search-bar svg{color:var(--muted);width:16px;height:16px}
+.nav-links{display:flex;align-items:center;gap:8px;margin-left:auto}
+.btn{padding:8px 18px;border-radius:40px;font-size:14px;font-weight:500;transition:all 0.15s}
+.btn-ghost{background:transparent;color:var(--text);border:1.5px solid var(--border)}
+.btn-ghost:hover{background:var(--bg)}
+.btn-primary{background:var(--brand);color:#fff;border:1.5px solid var(--brand)}
+.btn-primary:hover{background:var(--brand-dark)}
+.btn-lg{padding:13px 28px;font-size:15px}
+.nav-avatar{width:34px;height:34px;border-radius:50%;object-fit:cover;border:2px solid var(--brand);cursor:pointer}
+.nav-user-name{font-size:13px;font-weight:500;max-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seller-badge{font-size:10px;background:var(--green-light);color:var(--green);padding:2px 7px;border-radius:40px;font-weight:600}
+
+/* PAGES */
+.page{display:none}.page.active{display:block}
+
+/* HERO */
+.hero{background:#fff;padding:64px 24px 48px;text-align:center;border-bottom:1px solid var(--border)}
+.hero h1{font-family:'Space Grotesk',sans-serif;font-size:clamp(36px,5vw,58px);font-weight:700;line-height:1.1;letter-spacing:-1.5px;margin-bottom:16px}
+.hero h1 em{font-style:normal;color:var(--brand)}
+.hero p{font-size:17px;color:var(--muted);max-width:500px;margin:0 auto 32px;line-height:1.6}
+.hero-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.trust-bar{display:flex;gap:32px;justify-content:center;margin-top:40px;flex-wrap:wrap}
+.trust-item{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.trust-item svg{color:var(--brand);width:16px;height:16px}
+
+/* FILTERS */
+.filters-wrap{max-width:1200px;margin:0 auto;padding:24px 24px 0}
+.cat-pills{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none}
+.cat-pills::-webkit-scrollbar{display:none}
+.pill{padding:7px 16px;border-radius:40px;font-size:13px;font-weight:500;background:#fff;border:1.5px solid var(--border);cursor:pointer;white-space:nowrap;transition:all 0.15s;color:var(--text)}
+.pill:hover,.pill.active{background:var(--brand);color:#fff;border-color:var(--brand)}
+
+/* LISTINGS */
+.section{max-width:1200px;margin:0 auto;padding:24px}
+.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+.section-head h2{font-size:20px;font-weight:600}
+.section-head a{font-size:13px;color:var(--brand);font-weight:500}
+.listings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px}
+.card{background:#fff;border-radius:var(--radius);border:1px solid var(--border);overflow:hidden;cursor:pointer;transition:transform 0.15s,box-shadow 0.15s}
+.card:hover{transform:translateY(-2px);box-shadow:var(--shadow)}
+.card-body{padding:12px}
+.card-title{font-size:14px;font-weight:500;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card-price{font-size:18px;font-weight:700;color:var(--brand);margin-bottom:6px}
+.card-meta{display:flex;align-items:center;justify-content:space-between}
+.card-loc{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:3px}
+.card-loc svg{width:11px;height:11px}
+.badge{font-size:11px;padding:3px 8px;border-radius:40px;background:var(--green-light);color:var(--green);font-weight:500}
+
+/* DETAIL */
+.detail-wrap{max-width:1000px;margin:0 auto;padding:32px 24px}
+.back-btn{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted);margin-bottom:20px;cursor:pointer}
+.back-btn:hover{color:var(--text)}
+.detail-grid{display:grid;grid-template-columns:1fr 360px;gap:32px;align-items:start}
+.gallery{border-radius:var(--radius);background:var(--bg);aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;font-size:80px}
+.detail-panel{background:#fff;border-radius:var(--radius);border:1px solid var(--border);padding:24px}
+.detail-price{font-size:32px;font-weight:700;color:var(--brand);margin-bottom:4px}
+.detail-title{font-size:22px;font-weight:600;margin-bottom:12px}
+.detail-loc{display:flex;align-items:center;gap:6px;font-size:14px;color:var(--muted);margin-bottom:20px}
+.divider{border:none;border-top:1px solid var(--border);margin:16px 0}
+.seller-row{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.avatar{width:44px;height:44px;border-radius:50%;background:var(--brand-light);display:flex;align-items:center;justify-content:center;font-weight:600;font-size:16px;color:var(--brand)}
+.seller-name{font-weight:500;font-size:14px}
+.seller-since{font-size:12px;color:var(--muted)}
+.platform-note{background:var(--brand-light);border-radius:8px;padding:12px;font-size:12px;color:var(--brand-dark);margin-bottom:16px;line-height:1.5}
+.btn-buy{width:100%;padding:14px;background:var(--brand);color:#fff;border-radius:40px;font-size:16px;font-weight:600;border:none;cursor:pointer;margin-bottom:10px;transition:background 0.15s}
+.btn-buy:hover{background:var(--brand-dark)}
+.btn-msg{width:100%;padding:13px;background:#fff;color:var(--text);border-radius:40px;font-size:15px;font-weight:500;border:1.5px solid var(--border);cursor:pointer;transition:all 0.15s}
+.btn-msg:hover{border-color:var(--brand);color:var(--brand)}
+.desc-section{margin-top:24px}
+.desc-section h3{font-size:16px;font-weight:600;margin-bottom:10px}
+.desc-section p{font-size:14px;color:var(--muted);line-height:1.7}
+
+/* SELL PAGE */
+.sell-wrap{max-width:680px;margin:0 auto;padding:40px 24px}
+.sell-wrap h1{font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:700;margin-bottom:6px}
+.sell-wrap .subtitle{font-size:15px;color:var(--muted);margin-bottom:32px}
+.form-section{background:#fff;border-radius:var(--radius);border:1px solid var(--border);padding:24px;margin-bottom:16px}
+.form-section h2{font-size:15px;font-weight:600;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.step-num{width:22px;height:22px;border-radius:50%;background:var(--brand);color:#fff;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+label{display:block;font-size:13px;font-weight:500;margin-bottom:6px}
+input[type=text],input[type=number],textarea,select{width:100%;padding:10px 14px;border:1.5px solid var(--border);border-radius:8px;font-size:14px;font-family:inherit;color:var(--text);background:#fff;transition:border-color 0.15s;margin-bottom:14px}
+input[type=text]:focus,input[type=number]:focus,textarea:focus,select:focus{outline:none;border-color:var(--brand)}
+textarea{resize:vertical;min-height:90px}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.upload-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:36px;text-align:center;cursor:pointer;transition:border-color 0.15s;margin-bottom:14px}
+.upload-zone:hover{border-color:var(--brand)}
+.upload-zone svg{width:28px;height:28px;color:var(--brand);margin-bottom:8px}
+.upload-zone p{font-size:13px;color:var(--muted)}
+.preview-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.preview-thumb{width:80px;height:80px;border-radius:8px;object-fit:cover;border:1px solid var(--border)}
+.fee-box{background:var(--brand-light);border-radius:var(--radius);padding:20px 24px;margin-bottom:20px}
+.fee-box h3{font-size:15px;font-weight:600;color:var(--brand-dark);margin-bottom:12px}
+.fee-row{display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px}
+.fee-row span:first-child{color:var(--muted)}
+.fee-row span:last-child{font-weight:600}
+.fee-total{border-top:1px solid rgba(255,92,43,0.2);padding-top:10px;margin-top:6px;font-size:14px;font-weight:700;color:var(--brand)}
+.submit-btn{width:100%;padding:15px;background:var(--brand);color:#fff;border-radius:40px;font-size:16px;font-weight:600;cursor:pointer;border:none;transition:background 0.15s}
+.submit-btn:hover{background:var(--brand-dark)}
+
+/* MODALS */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:200;display:none;align-items:center;justify-content:center;padding:20px}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:20px;max-width:460px;width:100%;padding:36px;position:relative;max-height:90vh;overflow-y:auto}
+.modal-close{position:absolute;top:16px;right:16px;background:var(--bg);border:none;width:30px;height:30px;border-radius:50%;font-size:16px;cursor:pointer;color:var(--muted)}
+.modal h2{font-family:'Space Grotesk',sans-serif;font-size:22px;font-weight:700;margin-bottom:6px}
+.modal .sub{font-size:14px;color:var(--muted);margin-bottom:24px;line-height:1.5}
+
+/* LOGIN MODAL */
+.google-btn{display:flex;align-items:center;justify-content:center;gap:12px;width:100%;padding:13px;border:1.5px solid var(--border);border-radius:40px;font-size:15px;font-weight:500;background:#fff;cursor:pointer;transition:all 0.15s}
+.google-btn:hover{border-color:var(--brand);background:var(--brand-light)}
+.google-btn img{width:20px;height:20px}
+
+/* ROLE MODAL */
+.role-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:8px}
+.role-card{border:2px solid var(--border);border-radius:var(--radius);padding:20px;text-align:center;cursor:pointer;transition:all 0.15s}
+.role-card:hover{border-color:var(--brand);background:var(--brand-light)}
+.role-card .role-icon{font-size:36px;margin-bottom:10px}
+.role-card h3{font-size:15px;font-weight:600;margin-bottom:4px}
+.role-card p{font-size:12px;color:var(--muted);line-height:1.4}
+
+/* GPAY MODAL */
+.gpay-qr-box{background:var(--bg);border-radius:var(--radius);padding:20px;text-align:center;margin-bottom:20px;border:1px solid var(--border)}
+.gpay-qr-box img{width:180px;height:180px;border-radius:8px;margin-bottom:12px}
+.gpay-upi{font-size:14px;font-weight:600;color:var(--text);margin-bottom:4px}
+.gpay-note{font-size:12px;color:var(--muted)}
+.amount-pill{display:inline-block;background:var(--brand);color:#fff;font-size:20px;font-weight:700;padding:10px 28px;border-radius:40px;margin-bottom:20px}
+.steps-list{list-style:none;margin-bottom:20px}
+.steps-list li{font-size:13px;color:var(--muted);padding:7px 0;border-bottom:1px solid var(--border);display:flex;align-items:flex-start;gap:10px}
+.steps-list li:last-child{border:none}
+.step-dot{width:20px;height:20px;border-radius:50%;background:var(--brand-light);color:var(--brand);font-size:11px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;margin-top:1px}
+.utr-row{display:flex;gap:8px;margin-bottom:16px}
+.utr-row input{flex:1;margin-bottom:0}
+.utr-row button{padding:10px 16px;background:var(--brand);color:#fff;border-radius:8px;font-size:13px;font-weight:600;white-space:nowrap}
+
+/* PENDING MODAL */
+.pending-icon{font-size:48px;text-align:center;margin-bottom:12px}
+.pending-box{background:var(--green-light);border-radius:var(--radius);padding:16px;font-size:13px;color:var(--green);line-height:1.6;margin-bottom:20px}
+
+/* BUY MODAL */
+.pay-methods{display:flex;gap:8px;margin-bottom:20px}
+.pay-btn{flex:1;padding:10px;border:1.5px solid var(--border);border-radius:8px;font-size:13px;font-weight:500;background:#fff;cursor:pointer;transition:all 0.15s}
+.pay-btn:hover,.pay-btn.active{border-color:var(--brand);color:var(--brand);background:var(--brand-light)}
+.confirm-btn{width:100%;padding:14px;background:var(--brand);color:#fff;border-radius:40px;font-size:15px;font-weight:600;cursor:pointer;border:none;margin-top:8px}
+.success-state{text-align:center;padding:12px 0}
+.success-icon{font-size:48px;margin-bottom:12px}
+.success-state h2{font-size:20px;font-weight:700;margin-bottom:8px}
+.success-state p{font-size:14px;color:var(--muted);line-height:1.6}
+.amount-box{background:var(--brand-light);border-radius:var(--radius);padding:16px 20px;text-align:center;margin-bottom:20px}
+.amount-box .alabel{font-size:12px;color:var(--brand-dark);margin-bottom:4px}
+.amount-box .amount{font-size:36px;font-weight:700;color:var(--brand)}
+.amount-box .anote{font-size:12px;color:var(--muted);margin-top:4px}
+
+/* FEATURE LIST */
+.feature-list{list-style:none;margin-bottom:20px}
+.feature-list li{font-size:13px;padding:6px 0;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;color:var(--muted)}
+.feature-list li:last-child{border:none}
+.feature-list li::before{content:'✓';color:var(--green);font-weight:700;font-size:14px}
+
+footer{background:#fff;border-top:1px solid var(--border);padding:40px 24px;margin-top:40px}
+.footer-inner{max-width:1200px;margin:0 auto;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:32px}
+.footer-brand .logo{display:block;margin-bottom:8px}
+.footer-brand p{font-size:13px;color:var(--muted);line-height:1.6}
+.footer-col h4{font-size:13px;font-weight:600;margin-bottom:12px}
+.footer-col a{display:block;font-size:13px;color:var(--muted);margin-bottom:8px}
+.footer-col a:hover{color:var(--brand)}
+.footer-bottom{max-width:1200px;margin:32px auto 0;padding-top:20px;border-top:1px solid var(--border);display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.footer-bottom p{font-size:12px;color:var(--muted)}
+
+@media(max-width:700px){
+  .detail-grid{grid-template-columns:1fr}
+  .form-row{grid-template-columns:1fr}
+  .hero h1{font-size:32px}
+  .nav-links .btn-ghost{display:none}
+  .role-cards{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-inner">
+    <div class="logo" onclick="showPage('home')">Sell<span>It</span></div>
+    <div class="search-bar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+      <input type="text" placeholder="Search furniture, electronics, clothes…"/>
+    </div>
+    <div class="nav-links" id="nav-links">
+      <button class="btn btn-ghost" onclick="showModal('login-modal')">Log in</button>
+      <button class="btn btn-primary" onclick="handleSellClick()">+ List an item</button>
+    </div>
+  </div>
+</nav>
+
+<!-- HOME -->
+<div id="page-home" class="page active">
+  <div class="hero">
+    <h1>Buy & sell <em>anything</em><br/>near you</h1>
+    <p>Post your item in minutes. Real people, real prices, right in your city.</p>
+    <div class="hero-btns">
+      <button class="btn btn-primary btn-lg" onclick="handleSellClick()">Start selling →</button>
+      <button class="btn btn-ghost btn-lg">Browse listings</button>
+    </div>
+    <div class="trust-bar">
+      <div class="trust-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Secure payments</div>
+      <div class="trust-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>List in under 5 mins</div>
+      <div class="trust-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>12,400+ sellers</div>
+      <div class="trust-item"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>Across 50+ cities</div>
+    </div>
+  </div>
+  <div class="filters-wrap">
+    <div class="cat-pills">
+      <div class="pill active">All</div>
+      <div class="pill">🛋️ Furniture</div><div class="pill">📱 Electronics</div>
+      <div class="pill">👕 Clothes</div><div class="pill">🚲 Vehicles</div>
+      <div class="pill">📚 Books</div><div class="pill">🧸 Toys & Kids</div>
+      <div class="pill">🏋️ Sports</div><div class="pill">🎨 Art & Decor</div>
+      <div class="pill">🍳 Kitchen</div><div class="pill">🔧 Tools</div>
+    </div>
+  </div>
+  <div class="section">
+    <div class="section-head"><h2>Recently listed</h2><a href="#">See all →</a></div>
+    <div class="listings-grid" id="listings-grid"></div>
+  </div>
+</div>
+
+<!-- DETAIL -->
+<div id="page-detail" class="page">
+  <div class="detail-wrap">
+    <div class="back-btn" onclick="showPage('home')">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>Back to listings
+    </div>
+    <div class="detail-grid">
+      <div>
+        <div class="gallery" id="detail-img">🛋️</div>
+        <div class="desc-section"><h3>Description</h3><p id="detail-desc"></p></div>
+      </div>
+      <div class="detail-panel">
+        <div class="detail-price" id="detail-price">₹0</div>
+        <div class="detail-title" id="detail-title"></div>
+        <div class="detail-loc">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+          <span id="detail-loc"></span>
+        </div>
+        <div class="divider"></div>
+        <div class="seller-row">
+          <div class="avatar" id="detail-avatar">R</div>
+          <div><div class="seller-name" id="detail-seller"></div><div class="seller-since">Member since 2023 · ⭐ 4.8</div></div>
+        </div>
+        <div class="platform-note">🔒 SellIt protects this transaction. 20% platform fee applies on sale.</div>
+        <button class="btn-buy" onclick="handleBuyClick()">Buy now</button>
+        <button class="btn-msg">Message seller</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- SELL -->
+<div id="page-sell" class="page">
+  <div class="sell-wrap">
+    <h1>List your item</h1>
+    <p class="subtitle">Annual platform fee of ₹499/year. We handle payments — you handle handover.</p>
+    <div class="form-section">
+      <h2><span class="step-num">1</span> Photos</h2>
+      <div class="upload-zone" onclick="triggerUpload()" id="upload-zone">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        <p><strong>Click to upload photos</strong><br/>JPEG or PNG · Up to 8 photos</p>
+      </div>
+      <input type="file" id="file-input" multiple accept="image/*" style="display:none" onchange="previewPhotos(event)"/>
+      <div class="preview-row" id="preview-row"></div>
+    </div>
+    <div class="form-section">
+      <h2><span class="step-num">2</span> Item details</h2>
+      <label>Title</label><input type="text" placeholder="e.g. Wooden dining table, 6 seater" id="item-title"/>
+      <label>Category</label>
+      <select id="item-cat">
+        <option value="">Select a category</option>
+        <option>Furniture</option><option>Electronics</option><option>Clothes & Accessories</option>
+        <option>Vehicles</option><option>Books</option><option>Toys & Kids</option>
+        <option>Sports & Fitness</option><option>Art & Decor</option>
+        <option>Kitchen & Appliances</option><option>Tools & Hardware</option><option>Other</option>
+      </select>
+      <label>Description</label>
+      <textarea placeholder="Describe your item — condition, age, reason for selling…" id="item-desc"></textarea>
+      <div class="form-row">
+        <div><label>Condition</label><select><option>New</option><option>Like new</option><option>Good</option><option>Fair</option></select></div>
+        <div><label>Year purchased</label><input type="text" placeholder="e.g. 2021"/></div>
+      </div>
+    </div>
+    <div class="form-section">
+      <h2><span class="step-num">3</span> Pricing & location</h2>
+      <label>Asking price (₹)</label>
+      <input type="number" placeholder="e.g. 4500" id="item-price" oninput="updateEarnings()"/>
+      <div id="earnings-preview" style="display:none;background:var(--brand-light);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:13px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--muted)">Listing price</span><span id="ep-price" style="font-weight:500"></span></div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px"><span style="color:var(--muted)">SellIt fee (20%)</span><span id="ep-fee" style="color:#cc4118;font-weight:500"></span></div>
+        <div style="display:flex;justify-content:space-between;border-top:1px solid rgba(255,92,43,0.2);padding-top:8px;margin-top:4px"><span style="font-weight:600">You receive</span><span id="ep-earn" style="font-weight:700;color:var(--green)"></span></div>
+      </div>
+      <label>City</label><input type="text" placeholder="e.g. Mumbai" id="item-city"/>
+      <label>Area / Locality</label><input type="text" placeholder="e.g. Bandra West" id="item-area"/>
+    </div>
+    <div class="fee-box">
+      <h3>Your seller plan</h3>
+      <div class="fee-row"><span>Annual platform fee</span><span>₹499 / year</span></div>
+      <div class="fee-row"><span>Transaction fee on each sale</span><span>20% of sale price</span></div>
+      <div class="fee-row"><span>Listings allowed</span><span>Unlimited</span></div>
+      <div class="fee-row fee-total"><span>Account status</span><span id="seller-status-text">Checking…</span></div>
+    </div>
+    <button class="submit-btn" onclick="submitListing()">Publish listing →</button>
+  </div>
+</div>
+
+<!-- ══════════════ MODALS ══════════════ -->
+
+<!-- LOGIN -->
+<div class="modal-overlay" id="login-modal">
+  <div class="modal" style="max-width:400px;text-align:center">
+    <button class="modal-close" onclick="closeAllModals()">✕</button>
+    <div style="font-size:44px;margin-bottom:12px">🛍️</div>
+    <h2>Welcome to SellIt</h2>
+    <p class="sub">Sign in with Google to buy, sell, and connect with people near you. It's free.</p>
+    <button class="google-btn" onclick="googleSignIn()">
+      <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="G"/>
+      Continue with Google
+    </button>
+    <p style="font-size:11px;color:var(--muted);margin-top:16px;line-height:1.6">
+      By continuing you agree to SellIt's Terms of Use and Privacy Policy.
+    </p>
+  </div>
+</div>
+
+<!-- ROLE SELECTION -->
+<div class="modal-overlay" id="role-modal">
+  <div class="modal">
+    <h2>How will you use SellIt?</h2>
+    <p class="sub">Choose your role. You can always upgrade later.</p>
+    <div class="role-cards">
+      <div class="role-card" onclick="saveRole('buyer')">
+        <div class="role-icon">🛒</div>
+        <h3>I'm a buyer</h3>
+        <p>Browse and buy from sellers near you. Always free.</p>
+      </div>
+      <div class="role-card" onclick="saveRole('seller')">
+        <div class="role-icon">🏷️</div>
+        <h3>I'm a seller</h3>
+        <p>List items for sale. ₹499/year platform fee to activate.</p>
+      </div>
+    </div>
+    <p style="font-size:12px;color:var(--muted);text-align:center;margin-top:12px">
+      Not sure? Pick buyer — upgrade to seller anytime.
+    </p>
+  </div>
+</div>
+
+<!-- SELLER FEE → GPAY -->
+<div class="modal-overlay" id="seller-fee-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeAllModals()">✕</button>
+    <h2>Activate seller account</h2>
+    <p class="sub">Pay ₹499 via GPay to start listing. Your account activates within a few hours after we confirm the payment.</p>
+
+    <div style="text-align:center;margin-bottom:16px">
+      <div class="amount-pill">₹499</div>
+    </div>
+
+    <!-- GPay QR Code -->
+    <div class="gpay-qr-box">
+      <!-- QR generated from UPI ID: rekhahh-1@okhdfcbank -->
+      <img
+        src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=upi://pay?pa=rekhahh-1@okhdfcbank%26pn=SellIt%26am=499%26cu=INR%26tn=SellIt+Seller+Fee"
+        alt="GPay QR Code"
+      />
+      <div class="gpay-upi">rekhahh-1@okhdfcbank</div>
+      <div class="gpay-note">Open GPay → Scan QR → Pay ₹499</div>
+    </div>
+
+    <ul class="steps-list">
+      <li><span class="step-dot">1</span>Open Google Pay on your phone</li>
+      <li><span class="step-dot">2</span>Tap "Scan QR" and scan the code above, or send to <strong>rekhahh-1@okhdfcbank</strong></li>
+      <li><span class="step-dot">3</span>Pay exactly ₹499 — add "SellIt fee" in remarks</li>
+      <li><span class="step-dot">4</span>Enter your UTR / transaction ID below and submit</li>
+      <li><span class="step-dot">5</span>We'll verify and activate your account within a few hours</li>
+    </ul>
+
+    <label>Your UTR / Transaction ID</label>
+    <div class="utr-row">
+      <input type="text" id="utr-input" placeholder="e.g. 427819263541"/>
+      <button onclick="submitPaymentProof()">Submit</button>
+    </div>
+
+    <ul class="feature-list">
+      <li>Unlimited item listings for 1 year</li>
+      <li>Buyers contact you directly</li>
+      <li>20% platform fee only when you sell</li>
+      <li>Verified Seller badge on your profile</li>
+    </ul>
+
+    <p style="font-size:11px;color:var(--muted);text-align:center">
+      Having trouble? Email us at support@sellit.in
+    </p>
+  </div>
+</div>
+
+<!-- PAYMENT PENDING CONFIRMATION -->
+<div class="modal-overlay" id="payment-pending-modal">
+  <div class="modal" style="text-align:center">
+    <div class="pending-icon">⏳</div>
+    <h2>Payment submitted!</h2>
+    <p class="sub">We received your UTR. Here's what happens next:</p>
+    <div class="pending-box">
+      ✅ We'll verify your GPay payment within <strong>2–4 hours</strong><br/>
+      ✅ You'll get an email at <span id="pending-email"></span> once approved<br/>
+      ✅ Your seller account will be active and you can start listing
+    </div>
+    <button class="confirm-btn" onclick="closeAllModals()">Got it, I'll wait</button>
+  </div>
+</div>
+
+<!-- BUY MODAL -->
+<div class="modal-overlay" id="pay-modal">
+  <div class="modal">
+    <div id="modal-pay-state">
+      <h2>Complete your purchase</h2>
+      <p class="sub">Buying <strong id="modal-item-name"></strong> from <span id="modal-seller-name"></span></p>
+      <div class="amount-box">
+        <div class="alabel">Total to pay</div>
+        <div class="amount" id="modal-amount">₹0</div>
+        <div class="anote">Includes SellIt buyer protection</div>
+      </div>
+      <p style="font-size:13px;color:var(--muted);margin-bottom:12px">Choose payment method</p>
+      <div class="pay-methods">
+        <button class="pay-btn active" onclick="selectPay(this)">GPay / UPI</button>
+        <button class="pay-btn" onclick="selectPay(this)">Debit card</button>
+        <button class="pay-btn" onclick="selectPay(this)">Net banking</button>
+      </div>
+      <input type="text" placeholder="Enter UPI ID or card number" style="margin-bottom:0"/>
+      <button class="confirm-btn" onclick="confirmPay()">Confirm & Pay</button>
+      <p style="font-size:11px;color:var(--muted);text-align:center;margin-top:10px">🔒 Secured by SellIt</p>
+      <button onclick="closeAllModals()" style="display:block;margin:12px auto 0;background:none;border:none;color:var(--muted);font-size:13px;cursor:pointer">Cancel</button>
+    </div>
+    <div id="modal-success-state" style="display:none" class="success-state">
+      <div class="success-icon">🎉</div>
+      <h2>Payment successful!</h2>
+      <p>Order placed! The seller will contact you within 24 hours to arrange handover.</p>
+      <button class="confirm-btn" style="margin-top:20px" onclick="closeAllModals();showPage('home')">Back to listings</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="footer-inner">
+    <div class="footer-brand"><span class="logo">Sell<span>It</span></span><p>India's most honest peer-to-peer marketplace. No junk, no middlemen.</p></div>
+    <div class="footer-col"><h4>Sell</h4><a href="#">How it works</a><a href="#">Pricing & fees</a><a href="#">Seller tips</a><a href="#">Prohibited items</a></div>
+    <div class="footer-col"><h4>Buy</h4><a href="#">Browse listings</a><a href="#">Buyer protection</a><a href="#">Safe meetup guide</a></div>
+    <div class="footer-col"><h4>Company</h4><a href="#">About SellIt</a><a href="#">Blog</a><a href="#">Careers</a><a href="#">Contact us</a></div>
+  </div>
+  <div class="footer-bottom">
+    <p>© 2025 SellIt Technologies Pvt. Ltd. · All rights reserved.</p>
+    <p>Privacy Policy · Terms of Use · Grievance Officer</p>
+  </div>
+</footer>
+
+<script>
+const LISTINGS = [
+  {id:1,emoji:'🛋️',title:'L-shaped sectional sofa, grey',price:12500,loc:'Bandra, Mumbai',seller:'Priya S.',avatar:'P',desc:'Selling my L-shaped sectional sofa. 3 years old, well maintained. No stains. Width 240cm. Reason: relocating.',badge:'Furniture'},
+  {id:2,emoji:'📱',title:'iPhone 13 Pro, 256GB Sierra Blue',price:48000,loc:'Koramangala, Bengaluru',seller:'Arjun R.',avatar:'A',desc:'Used for 1 year. Battery health 91%. All accessories included, original box. No scratches on screen.',badge:'Electronics'},
+  {id:3,emoji:'🚲',title:'Trek FX3 hybrid bike, 2022',price:22000,loc:'Powai, Mumbai',seller:'Neha K.',avatar:'N',desc:'Trek FX3 in great shape. Serviced 3 months ago. Comes with lock and rear rack.',badge:'Vehicles'},
+  {id:4,emoji:'🧸',title:'LEGO Technic Bugatti, sealed box',price:8500,loc:'Salt Lake, Kolkata',seller:'Dev M.',avatar:'D',desc:'Bought as a gift but already own one. Completely sealed, never opened. Original MRP ₹11,999.',badge:'Toys & Kids'},
+  {id:5,emoji:'🪑',title:'Ergonomic office chair – Herman Miller',price:32000,loc:'Indiranagar, Bengaluru',seller:'Sana A.',avatar:'S',desc:'Herman Miller Aeron, size B. Used for 8 months during WFH. Perfect condition.',badge:'Furniture'},
+  {id:6,emoji:'📷',title:'Sony Alpha A7III camera body',price:95000,loc:'Andheri, Mumbai',seller:'Rahul J.',avatar:'R',desc:'A7III body only. 8,000 actuations. Always used with UV filter. Original packaging included.',badge:'Electronics'},
+  {id:7,emoji:'🏋️',title:'Adjustable dumbbells 5–52.5 lbs',price:14000,loc:'Gurgaon',seller:'Meera T.',avatar:'M',desc:'Bowflex SelectTech dumbbells. Replace 15 sets of weights. Minor scuffs on the stand.',badge:'Sports'},
+  {id:8,emoji:'📚',title:'MBA prep book bundle (CAT/GMAT)',price:1200,loc:'Dadar, Mumbai',seller:'Aditya P.',avatar:'A',desc:'10+ books including Arun Sharma quant, GMAT OG 2023. Some pencil highlighting.',badge:'Books'},
+];
+let currentListing = null;
+
+function showPage(name){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  window.scrollTo(0,0);
+  if(name==='sell') updateSellerStatus();
+}
+function showModal(id){ closeAllModals(); document.getElementById(id).classList.add('open'); }
+function closeAllModals(){ document.querySelectorAll('.modal-overlay').forEach(m=>m.classList.remove('open')); }
+document.querySelectorAll('.modal-overlay').forEach(m=>{
+  m.addEventListener('click',e=>{ if(e.target===m) closeAllModals(); });
+});
+
+function updateNavUser(user){
+  const nav = document.getElementById('nav-links');
+  if(user){
+    const paid = window._sellerPaid && window._userRole==='seller';
+    nav.innerHTML = `
+      <span class="nav-user-name">${user.displayName.split(' ')[0]}</span>
+      ${paid?'<span class="seller-badge">Seller ✓</span>':''}
+      <img class="nav-avatar" src="${user.photoURL}" alt="${user.displayName}" onclick="showUserMenu()" title="My account"/>
+      <button class="btn btn-primary" onclick="handleSellClick()">+ List an item</button>
+    `;
+  } else {
+    nav.innerHTML = `
+      <button class="btn btn-ghost" onclick="showModal('login-modal')">Log in</button>
+      <button class="btn btn-primary" onclick="handleSellClick()">+ List an item</button>
+    `;
+  }
+}
+
+function showUserMenu(){
+  const name  = window._currentUser?.displayName || 'User';
+  const role  = window._userRole || 'buyer';
+  const paid  = window._sellerPaid ? 'Active ✓' : 'Pending / Not paid';
+  if(confirm(`Account: ${name}\nRole: ${role}\nSeller status: ${paid}\n\nSign out?`)){
+    doSignOut();
+  }
+}
+
+function handleSellClick(){
+  if(!window._currentUser){ showModal('login-modal'); return; }
+  if(window._userRole==='buyer'){
+    if(confirm('You are currently a buyer.\nWant to become a seller? (₹499/year)')){ showModal('seller-fee-modal'); }
+    return;
+  }
+  if(!window._sellerPaid){ showModal('seller-fee-modal'); return; }
+  showPage('sell');
+}
+
+function updateSellerStatus(){
+  const el = document.getElementById('seller-status-text');
+  if(!el) return;
+  if(window._sellerPaid){
+    const until = window._sellerPaidUntil
+      ? new Date(window._sellerPaidUntil).toLocaleDateString('en-IN') : '';
+    el.textContent = 'Active' + (until?' · expires '+until:'');
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = 'Not activated — pay ₹499 to publish';
+    el.style.color = 'var(--brand)';
+  }
+}
+
+// Show user email in pending modal
+document.getElementById('payment-pending-modal')
+  .addEventListener('transitionend', () => {
+    const el = document.getElementById('pending-email');
+    if(el && window._currentUser) el.textContent = window._currentUser.email;
+  });
+
+function renderListings(){
+  document.getElementById('listings-grid').innerHTML = LISTINGS.map(l=>`
+    <div class="card" onclick="showDetail(${l.id})">
+      <div style="font-size:52px;display:flex;align-items:center;justify-content:center;height:180px;background:#f8f7f5">${l.emoji}</div>
+      <div class="card-body">
+        <div class="card-title">${l.title}</div>
+        <div class="card-price">₹${l.price.toLocaleString('en-IN')}</div>
+        <div class="card-meta">
+          <div class="card-loc">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+            ${l.loc}
+          </div>
+          <div class="badge">${l.badge}</div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function showDetail(id){
+  currentListing = LISTINGS.find(l=>l.id===id);
+  if(!currentListing) return;
+  document.getElementById('detail-img').textContent    = currentListing.emoji;
+  document.getElementById('detail-price').textContent  = '₹'+currentListing.price.toLocaleString('en-IN');
+  document.getElementById('detail-title').textContent  = currentListing.title;
+  document.getElementById('detail-loc').textContent    = currentListing.loc;
+  document.getElementById('detail-seller').textContent = currentListing.seller;
+  document.getElementById('detail-avatar').textContent = currentListing.avatar;
+  document.getElementById('detail-desc').textContent   = currentListing.desc;
+  showPage('detail');
+}
+
+function handleBuyClick(){
+  if(!window._currentUser){ showModal('login-modal'); return; }
+  document.getElementById('modal-item-name').textContent   = currentListing.title;
+  document.getElementById('modal-seller-name').textContent = currentListing.seller;
+  document.getElementById('modal-amount').textContent      = '₹'+currentListing.price.toLocaleString('en-IN');
+  document.getElementById('modal-pay-state').style.display     = 'block';
+  document.getElementById('modal-success-state').style.display = 'none';
+  showModal('pay-modal');
+}
+
+function selectPay(btn){
+  document.querySelectorAll('.pay-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function confirmPay(){
+  document.getElementById('modal-pay-state').style.display    = 'none';
+  document.getElementById('modal-success-state').style.display= 'block';
+}
+function triggerUpload(){ document.getElementById('file-input').click(); }
+function previewPhotos(e){
+  const files = Array.from(e.target.files).slice(0,8);
+  const row = document.getElementById('preview-row');
+  row.innerHTML = '';
+  files.forEach(f=>{
+    const reader = new FileReader();
+    reader.onload = ev => {
+      const img = document.createElement('img');
+      img.src = ev.target.result; img.className='preview-thumb';
+      row.appendChild(img);
+    };
+    reader.readAsDataURL(f);
+  });
+  if(files.length) document.getElementById('upload-zone').style.display='none';
+}
+function updateEarnings(){
+  const val = parseInt(document.getElementById('item-price').value)||0;
+  const box = document.getElementById('earnings-preview');
+  if(val>0){
+    box.style.display='block';
+    document.getElementById('ep-price').textContent = '₹'+val.toLocaleString('en-IN');
+    const fee=Math.round(val*0.2), earn=val-fee;
+    document.getElementById('ep-fee').textContent  = '−₹'+fee.toLocaleString('en-IN');
+    document.getElementById('ep-earn').textContent = '₹'+earn.toLocaleString('en-IN');
+  } else { box.style.display='none'; }
+}
+function submitListing(){
+  if(!window._sellerPaid){ showModal('seller-fee-modal'); return; }
+  const title = document.getElementById('item-title').value;
+  if(!title){ alert('Please add a title.'); return; }
+  const price = document.getElementById('item-price').value;
+  if(!price){ alert('Please enter a price.'); return; }
+  const city = document.getElementById('item-city').value||'Your city';
+  const area = document.getElementById('item-area').value||'';
+  const desc = document.getElementById('item-desc').value||'No description.';
+  const user = window._currentUser;
+  LISTINGS.unshift({
+    id: 9+LISTINGS.length, emoji:'📦', title, price:parseInt(price),
+    loc: area?area+', '+city:city,
+    seller: user ? user.displayName.split(' ')[0]+' '+user.displayName.split(' ').pop()[0]+'.' : 'You',
+    avatar: user ? user.displayName[0] : 'Y',
+    desc, badge: document.getElementById('item-cat').value||'Other'
+  });
+  renderListings(); showPage('home');
+  setTimeout(()=>alert('Your listing is live! Buyers can now find your item.'),300);
+}
+
+document.querySelectorAll('.pill').forEach(p=>{
+  p.addEventListener('click',function(){
+    document.querySelectorAll('.pill').forEach(x=>x.classList.remove('active'));
+    this.classList.add('active');
+  });
+});
+
+renderListings();
+</script>
+</body>
+</html>
